@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Social-to-Story Studio</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace" aria-label="Story generation workspace">
+        <form class="composer" id="storyForm">
+          <div class="brand-row">
+            <div class="brand-mark" aria-hidden="true">S</div>
+            <div>
+              <h1>Social-to-Story Studio</h1>
+              <p>Turn a short social update into a structured publication draft.</p>
+            </div>
+          </div>
+
+          <label for="tweetText">Post text</label>
+          <textarea
+            id="tweetText"
+            name="tweetText"
+            rows="12"
+            placeholder="Paste the tweet or short social update here..."
+            required
+          ></textarea>
+
+          <div class="field-grid">
+            <div>
+              <label for="authorHandle">Author handle</label>
+              <input id="authorHandle" name="authorHandle" placeholder="@MoitOfficial" />
+            </div>
+            <div>
+              <label for="postUrl">Post URL</label>
+              <input id="postUrl" name="postUrl" placeholder="Optional" />
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="primary" type="submit" id="generateButton">Generate Story</button>
+            <button class="secondary" type="button" id="sampleButton">Use Demo Text</button>
+          </div>
+
+          <p class="status" id="statusMessage" role="status"></p>
+        </form>
+
+        <section class="reader" aria-label="Generated story preview">
+          <div class="reader-toolbar">
+            <div>
+              <span class="eyebrow">Preview</span>
+              <h2 id="previewTitle">Generated story will appear here</h2>
+            </div>
+            <div class="download-group" aria-label="Download options">
+              <button class="ghost" type="button" id="downloadMarkdown" disabled>Markdown</button>
+              <button class="ghost" type="button" id="downloadDocx" disabled>Word Doc</button>
+            </div>
+          </div>
+
+          <article class="story-card empty" id="storyPreview">
+            <p>
+              Paste a post, generate the story, then download it as an organized
+              Markdown file or Word document.
+            </p>
+          </article>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

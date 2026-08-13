@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.git/
+.gitignore
+.env
+.venv/
+venv/
+tests/
+README.md
+PROJECT_BLUEPRINT.md
+*.md
