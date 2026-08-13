@@ -1,0 +1,21 @@
+# Not used by Vercel's Python runtime — deployment artifacts for other platforms
+Dockerfile
+.dockerignore
+render.yaml
+
+# Tests and docs aren't needed in the deployed function bundle
+tests/
+README.md
+PROJECT_BLUEPRINT.md
+
+# Local environment files — never deploy secrets; set them in Vercel's dashboard instead
+.env
+.env.example
+
+# Standard local/dev clutter
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+*.log
