@@ -2,6 +2,7 @@ const form = document.querySelector("#storyForm");
 const tweetText = document.querySelector("#tweetText");
 const authorHandle = document.querySelector("#authorHandle");
 const postUrl = document.querySelector("#postUrl");
+const storyLength = document.querySelector("#storyLength");
 const generateButton = document.querySelector("#generateButton");
 const sampleButton = document.querySelector("#sampleButton");
 const statusMessage = document.querySelector("#statusMessage");
@@ -85,11 +86,14 @@ function renderStory(story) {
     `
     : "";
 
+  const lengthLabel = story.story_length === "short" ? "Short brief" : "Full feature";
+
   storyPreview.innerHTML = `
     <h1>${escapeHtml(story.title)}</h1>
     <p><strong>${escapeHtml(story.subtitle)}</strong></p>
     <div class="story-meta">
       <p><strong>Source:</strong> ${escapeHtml(story.source_context)}</p>
+      <p><strong>Length:</strong> ${escapeHtml(lengthLabel)}</p>
       <p><strong>Word count:</strong> ${escapeHtml(String(story.word_count))}</p>
     </div>
     ${factsTable}
@@ -107,6 +111,7 @@ function buildPayload() {
     author_handle: authorHandle.value.trim(),
     post_url: postUrl.value.trim(),
     output_format: "markdown",
+    story_length: storyLength.value || null,
   };
 }
 

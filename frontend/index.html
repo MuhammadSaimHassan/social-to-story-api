@@ -49,6 +49,19 @@
             actually exists before generating a story from it.
           </p>
 
+          <div>
+            <label for="storyLength">Story length</label>
+            <select id="storyLength" name="storyLength">
+              <option value="">Auto (let the API decide)</option>
+              <option value="short">Short brief (~150-300 words)</option>
+              <option value="long">Long feature (~600-800 words)</option>
+            </select>
+          </div>
+          <p class="field-hint">
+            Choose "Auto" to let the API judge the right length from the tweet's
+            content, or force a short brief or long feature yourself.
+          </p>
+
           <div class="actions">
             <button class="primary" type="submit" id="generateButton">Generate Story</button>
             <button class="secondary" type="button" id="sampleButton">Use Demo Text</button>

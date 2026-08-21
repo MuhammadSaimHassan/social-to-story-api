@@ -86,6 +86,8 @@ class TestGenerateStoryValidPayload:
         mock_generate.assert_awaited_once()
         _, kwargs = mock_generate.call_args
         assert kwargs["author_handle"] == VALID_AUTHOR_HANDLE
+        # No story_length supplied -> passed through as None (auto/model decides).
+        assert kwargs["requested_length"] is None
 
     def test_author_handle_without_at_prefix_is_normalized(self, fake_story_data):
         """author_handle supplied without '@' should be accepted and normalized."""
@@ -102,6 +104,109 @@ class TestGenerateStoryValidPayload:
             )
 
         assert response.status_code == 200
+
+
+class TestGenerateStoryUserControlledLength:
+    """The caller, not the model, now controls whether the story is short or long."""
+
+    @pytest.mark.parametrize("length", ["short", "long"])
+    def test_requested_length_is_forwarded_to_llm_service(self, fake_story_data, length):
+        with patch(
+            "app.routers.story.extractor.extract_content",
+            new=AsyncMock(return_value=VALID_TWEET_TEXT),
+        ), patch(
+            "app.routers.story.llm_service.generate_story_from_text",
+            new=AsyncMock(return_value=fake_story_data),
+        ) as mock_generate:
+            response = client.post(
+                "/api/v1/generate-story",
+                json=_valid_payload(story_length=length),
+            )
+
+        assert response.status_code == 200
+        _, kwargs = mock_generate.call_args
+        assert kwargs["requested_length"] == length
+
+    def test_story_length_is_case_insensitive_and_trimmed(self, fake_story_data):
+        with patch(
+            "app.routers.story.extractor.extract_content",
+            new=AsyncMock(return_value=VALID_TWEET_TEXT),
+        ), patch(
+            "app.routers.story.llm_service.generate_story_from_text",
+            new=AsyncMock(return_value=fake_story_data),
+        ) as mock_generate:
+            response = client.post(
+                "/api/v1/generate-story",
+                json=_valid_payload(story_length="  SHORT  "),
+            )
+
+        assert response.status_code == 200
+        _, kwargs = mock_generate.call_args
+        assert kwargs["requested_length"] == "short"
+
+    def test_omitted_story_length_defaults_to_none(self, fake_story_data):
+        payload = _valid_payload()
+        payload.pop("story_length", None)
+        with patch(
+            "app.routers.story.extractor.extract_content",
+            new=AsyncMock(return_value=VALID_TWEET_TEXT),
+        ), patch(
+            "app.routers.story.llm_service.generate_story_from_text",
+            new=AsyncMock(return_value=fake_story_data),
+        ) as mock_generate:
+            response = client.post("/api/v1/generate-story", json=payload)
+
+        assert response.status_code == 200
+        _, kwargs = mock_generate.call_args
+        assert kwargs["requested_length"] is None
+
+    def test_invalid_story_length_value_rejected(self):
+        response = client.post(
+            "/api/v1/generate-story",
+            json=_valid_payload(story_length="medium"),
+        )
+        assert response.status_code == 422
+
+    def test_llm_service_forces_story_length_from_caller(self):
+        """Even if the model's own output disagrees, the response must
+        reflect the caller's requested length, not the model's."""
+        from app.services import llm_service
+
+        fake_parsed_dict = {
+            "is_sufficient": True,
+            "rejection_reason": None,
+            "story_length": "long",  # model says long...
+            "title": "A Title",
+            "subtitle": "A Subtitle",
+            "source_context": "Source",
+            "summary_table": [],
+            "story_markdown": "Body text " * 20,
+        }
+
+        class _FakeResponse:
+            parsed = fake_parsed_dict
+            text = None
+            candidates = []
+
+        with patch(
+            "app.services.llm_service.settings"
+        ) as mock_settings, patch(
+            "app.services.llm_service._get_client"
+        ) as mock_get_client:
+            mock_settings.gemini_api_key = "fake-key"
+            mock_settings.default_model = "fake-model"
+            mock_client = mock_get_client.return_value
+            mock_client.aio.models.generate_content = AsyncMock(return_value=_FakeResponse())
+
+            result = asyncio.run(
+                llm_service.generate_story_from_text(
+                    content=VALID_TWEET_TEXT,
+                    author_handle=VALID_AUTHOR_HANDLE,
+                    requested_length="short",  # ...but the caller asked for short
+                )
+            )
+
+        assert result.story_length == "short"
 
 
 class TestGenerateStoryMissingFields:

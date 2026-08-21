@@ -27,6 +27,14 @@ class TableItem(BaseModel):
 class StoryData(BaseModel):
     """The generated story content and its structured metadata."""
 
+    story_length: str = Field(
+        default="long",
+        description=(
+            "Whether the model wrote a short brief or a full-length feature, "
+            "based on how much substantive content the source actually had."
+        ),
+        examples=["short", "long"],
+    )
     title: str = Field(
         description="Headline for the generated article.",
         examples=["Supercharging Digital Infrastructure: Pakistan Secures Guaranteed 17.7 Tbps Bandwidth"],

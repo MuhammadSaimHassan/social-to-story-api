@@ -61,6 +61,7 @@ class _LLMStoryOutput(BaseModel):
 
     is_sufficient: bool = False
     rejection_reason: Optional[str] = None
+    story_length: Optional[str] = None
     title: Optional[str] = None
     subtitle: Optional[str] = None
     source_context: Optional[str] = None
@@ -87,6 +88,17 @@ _LLM_RESPONSE_SCHEMA = {
                 "Required and populated only when is_sufficient is false: a "
                 "short, clear, user-facing explanation of why a story could not "
                 "be generated from this input."
+            ),
+        },
+        "story_length": {
+            "type": "STRING",
+            "enum": ["short", "long"],
+            "description": (
+                "Required when is_sufficient is true. 'short' for updates with "
+                "a single fact/angle and little surrounding context (~150-300 "
+                "word brief); 'long' for updates rich enough in distinct, "
+                "substantive angles to support a full feature (~600-800 words). "
+                "Prefer 'short' when in doubt — never pad thin material."
             ),
         },
         "title": {
@@ -153,6 +165,7 @@ def _count_words(text: str) -> int:
 async def generate_story_from_text(
     content: str,
     author_handle: Optional[str] = None,
+    requested_length: Optional[str] = None,
 ) -> StoryData:
     """Generate a structured news story from extracted source content.
 
@@ -160,6 +173,13 @@ async def generate_story_from_text(
         content: Cleaned source text (from the extractor service) to base
             the story on.
         author_handle: Optional handle/username used for source attribution.
+        requested_length: Optional caller-supplied "short" or "long". When
+            given, this is the authoritative length decision — the model is
+            instructed to write at this length regardless of how much
+            substance the source has, and the returned `story_length` is
+            forced to match this value even if the model's own output
+            disagrees. When omitted (None), the model decides the length
+            itself based on the source content, preserving prior behavior.
 
     Returns:
         A fully populated `StoryData` instance, with `word_count` computed
@@ -177,7 +197,11 @@ async def generate_story_from_text(
             detail="GEMINI_API_KEY is not configured on the server.",
         )
 
-    prompt = build_editorial_prompt(input_text=content, author_handle=author_handle)
+    prompt = build_editorial_prompt(
+        input_text=content,
+        author_handle=author_handle,
+        requested_length=requested_length,
+    )
 
     client = _get_client()
     call_config = types.GenerateContentConfig(
@@ -320,7 +344,14 @@ async def generate_story_from_text(
         for item in parsed.summary_table
     ]
 
+    # If the caller explicitly requested a length, that decision is
+    # authoritative — it overrides whatever the model reports, even though
+    # the prompt already instructs the model to match it. This guarantees
+    # the response never contradicts what the user asked for.
+    final_story_length = requested_length or parsed.story_length or "long"
+
     return StoryData(
+        story_length=final_story_length,
         title=parsed.title,
         subtitle=parsed.subtitle,
         source_context=parsed.source_context or f"Source: {author_handle}",

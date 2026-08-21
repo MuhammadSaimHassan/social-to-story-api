@@ -3,6 +3,7 @@ Request schemas for the Social-to-Story API.
 """
 
 import re
+from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -57,6 +58,33 @@ class StoryRequest(BaseModel):
         description="Desired format for the generated story body.",
         examples=["markdown"],
     )
+    story_length: Optional[str] = Field(
+        default=None,
+        description=(
+            "Desired length of the generated story: 'short' (~150-300 word "
+            "brief) or 'long' (~600-800 word feature). This is the caller's "
+            "choice, not the model's — whatever is passed here is what gets "
+            "generated, regardless of how much substance the source tweet "
+            "has. If omitted (or null), the API falls back to its previous "
+            "behavior and decides automatically based on the tweet's content."
+        ),
+        examples=["short"],
+    )
+
+    @field_validator("story_length")
+    @classmethod
+    def validate_story_length(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if not cleaned:
+            return None
+        if cleaned not in ("short", "long"):
+            raise ValueError(
+                "story_length must be either 'short' or 'long' (or omitted "
+                "to let the API decide automatically)."
+            )
+        return cleaned
 
     @field_validator("tweet_text")
     @classmethod

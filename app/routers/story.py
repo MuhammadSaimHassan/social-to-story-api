@@ -37,6 +37,7 @@ async def _generate_story_data(payload: StoryRequest):
         story_data = await llm_service.generate_story_from_text(
             content=content,
             author_handle=payload.author_handle,
+            requested_length=payload.story_length,
         )
     except HTTPException:
         # Already a well-formed HTTP error (e.g. 502 for LLM provider issues) — propagate as-is.
