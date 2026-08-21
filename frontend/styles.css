@@ -262,6 +262,15 @@ button:disabled {
   line-height: 1.68;
 }
 
+.cover-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 4px 0 18px;
+  border: 1px solid var(--line);
+}
+
 .story-meta {
   padding-bottom: 16px;
   margin-bottom: 18px;

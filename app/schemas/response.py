@@ -2,7 +2,7 @@
 Response schemas for the Social-to-Story API.
 """
 
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +58,20 @@ class StoryData(BaseModel):
         description="Word count of the generated story body.",
         ge=0,
         examples=[620],
+    )
+    cover_image_base64: Optional[str] = Field(
+        default=None,
+        description=(
+            "Base64-encoded cover image generated to be relevant to the "
+            "story, or null if image generation was unavailable/failed. "
+            "Image generation is best-effort and never blocks story "
+            "generation — this field being null does not indicate an error."
+        ),
+    )
+    cover_image_mime_type: Optional[str] = Field(
+        default=None,
+        description="MIME type of cover_image_base64 (e.g. 'image/png'), or null if no image was generated.",
+        examples=["image/png"],
     )
 
 

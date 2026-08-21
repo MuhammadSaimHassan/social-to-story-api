@@ -6,13 +6,15 @@ extractor service and passes it to the LLM service to produce a structured
 story response.
 """
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 from pydantic import ValidationError
 from starlette.responses import StreamingResponse
 
 from app.schemas.request import StoryRequest
 from app.schemas.response import StoryData, StoryResponse
-from app.services import docx_service, extractor, llm_service, markdown_service
+from app.services import docx_service, extractor, image_service, llm_service, markdown_service
 
 router = APIRouter(prefix="/api/v1", tags=["story"])
 
@@ -33,6 +35,19 @@ async def _generate_story_data(payload: StoryRequest):
             detail=f"Failed to extract content from the provided input: {exc}",
         ) from exc
 
+    # Kick off image generation concurrently with the text story rather
+    # than waiting for it to finish first — both are grounded in the same
+    # extracted content, so there's no need to serialize them, and doing
+    # so avoids stacking image latency on top of the story call's own
+    # retry/backoff logic (relevant given hosting platforms' request
+    # timeouts, e.g. Vercel's 60s limit).
+    image_task = asyncio.create_task(
+        image_service.generate_story_image(
+            content=content,
+            author_handle=payload.author_handle,
+        )
+    )
+
     try:
         story_data = await llm_service.generate_story_from_text(
             content=content,
@@ -41,19 +56,36 @@ async def _generate_story_data(payload: StoryRequest):
         )
     except HTTPException:
         # Already a well-formed HTTP error (e.g. 502 for LLM provider issues) — propagate as-is.
+        image_task.cancel()
         raise
     except ValidationError as exc:
+        image_task.cancel()
         raise HTTPException(
             status_code=500,
             detail=f"LLM output did not match the expected story schema: {exc}",
         ) from exc
     except Exception as exc:
+        image_task.cancel()
         raise HTTPException(
             status_code=500,
             detail=f"Unexpected error while generating the story: {exc}",
         ) from exc
 
-    return story_data
+    # Image generation is best-effort: generate_story_image() already
+    # catches its own failures internally and returns (None, None) rather
+    # than raising, but this except is a defensive backstop in case a
+    # cancellation or other asyncio-level issue surfaces here instead.
+    try:
+        cover_image_base64, cover_image_mime_type = await image_task
+    except Exception:
+        cover_image_base64, cover_image_mime_type = None, None
+
+    return story_data.model_copy(
+        update={
+            "cover_image_base64": cover_image_base64,
+            "cover_image_mime_type": cover_image_mime_type,
+        }
+    )
 
 
 @router.post(

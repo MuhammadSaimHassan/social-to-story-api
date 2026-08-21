@@ -5,6 +5,7 @@ Builds a downloadable Word document from a generated StoryData payload.
 """
 
 from io import BytesIO
+import base64
 import re
 
 from docx import Document
@@ -66,6 +67,24 @@ def _add_metadata_block(document: Document, story: StoryData) -> None:
     count.add_run(f"Word count: {story.word_count}")
 
 
+def _add_cover_image(document: Document, story: StoryData) -> None:
+    """Embed the generated cover image, if present. Silently does nothing
+    if no image was generated — image generation is best-effort, so its
+    absence is a normal, non-error state."""
+    if not story.cover_image_base64:
+        return
+
+    try:
+        image_bytes = base64.b64decode(story.cover_image_base64)
+    except Exception:
+        # Malformed base64 shouldn't break the whole document — just skip
+        # the image rather than failing the export.
+        return
+
+    document.add_picture(BytesIO(image_bytes), width=Inches(6.2))
+    document.add_paragraph()
+
+
 def _add_summary_table(document: Document, story: StoryData) -> None:
     if not story.summary_table:
         return
@@ -115,6 +134,7 @@ def build_story_docx(story: StoryData) -> tuple[BytesIO, str]:
     document = Document()
     _configure_document_styles(document)
     _add_metadata_block(document, story)
+    _add_cover_image(document, story)
     _add_summary_table(document, story)
     _add_markdown_story(document, story.story_markdown)
 

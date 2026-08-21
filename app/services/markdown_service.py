@@ -22,11 +22,24 @@ def build_story_markdown(story: StoryData) -> tuple[BytesIO, str]:
         "",
         f"*{story.subtitle}*",
         "",
-        f"**Source:** {story.source_context}",
-        "",
-        f"**Word count:** {story.word_count}",
-        "",
     ]
+
+    if story.cover_image_base64 and story.cover_image_mime_type:
+        lines.extend(
+            [
+                f"![Cover image](data:{story.cover_image_mime_type};base64,{story.cover_image_base64})",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            f"**Source:** {story.source_context}",
+            "",
+            f"**Word count:** {story.word_count}",
+            "",
+        ]
+    )
 
     if story.summary_table:
         lines.extend(

@@ -88,9 +88,15 @@ function renderStory(story) {
 
   const lengthLabel = story.story_length === "short" ? "Short brief" : "Full feature";
 
+  const coverImage =
+    story.cover_image_base64 && story.cover_image_mime_type
+      ? `<img class="cover-image" src="data:${story.cover_image_mime_type};base64,${story.cover_image_base64}" alt="Cover image for: ${escapeHtml(story.title)}" />`
+      : "";
+
   storyPreview.innerHTML = `
     <h1>${escapeHtml(story.title)}</h1>
     <p><strong>${escapeHtml(story.subtitle)}</strong></p>
+    ${coverImage}
     <div class="story-meta">
       <p><strong>Source:</strong> ${escapeHtml(story.source_context)}</p>
       <p><strong>Length:</strong> ${escapeHtml(lengthLabel)}</p>
@@ -163,13 +169,17 @@ sampleButton.addEventListener("click", () => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   setLoading(true);
-  setStatus("Generating story...");
+  setStatus("Generating story and cover image...");
 
   try {
     const result = await requestJson("/api/v1/generate-story", buildPayload());
     currentStory = result.data;
     renderStory(currentStory);
-    setStatus("Story generated. Download options are ready.");
+    setStatus(
+      currentStory.cover_image_base64
+        ? "Story and cover image generated. Download options are ready."
+        : "Story generated. Cover image wasn't available this time, but the story is ready."
+    );
   } catch (error) {
     setStatus(error.message, true);
   } finally {

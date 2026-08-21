@@ -385,3 +385,245 @@ class TestExtractorPostVerification:
             with pytest.raises(HTTPException) as exc_info:
                 asyncio.run(extractor.extract_content(VALID_TWEET_TEXT, VALID_POST_URL))
         assert exc_info.value.status_code == 400
+
+
+class TestGenerateStoryWithCoverImage:
+    """The story router runs image generation concurrently with the text
+    story and attaches the result — best-effort, never blocking success."""
+
+    def test_successful_image_is_attached_to_response(self, fake_story_data):
+        with patch(
+            "app.routers.story.extractor.extract_content",
+            new=AsyncMock(return_value=VALID_TWEET_TEXT),
+        ), patch(
+            "app.routers.story.llm_service.generate_story_from_text",
+            new=AsyncMock(return_value=fake_story_data),
+        ), patch(
+            "app.routers.story.image_service.generate_story_image",
+            new=AsyncMock(return_value=("ZmFrZWJhc2U2NGRhdGE=", "image/png")),
+        ) as mock_image:
+            response = client.post("/api/v1/generate-story", json=_valid_payload())
+
+        assert response.status_code == 200
+        body = response.json()["data"]
+        assert body["cover_image_base64"] == "ZmFrZWJhc2U2NGRhdGE="
+        assert body["cover_image_mime_type"] == "image/png"
+
+        # Confirm the image call was grounded in the same extracted content.
+        mock_image.assert_awaited_once()
+        _, kwargs = mock_image.call_args
+        assert kwargs["content"] == VALID_TWEET_TEXT
+        assert kwargs["author_handle"] == VALID_AUTHOR_HANDLE
+
+    def test_image_failure_does_not_break_story_generation(self, fake_story_data):
+        """If image generation fails outright, the story must still succeed
+        with null image fields — image generation is best-effort."""
+        with patch(
+            "app.routers.story.extractor.extract_content",
+            new=AsyncMock(return_value=VALID_TWEET_TEXT),
+        ), patch(
+            "app.routers.story.llm_service.generate_story_from_text",
+            new=AsyncMock(return_value=fake_story_data),
+        ), patch(
+            "app.routers.story.image_service.generate_story_image",
+            new=AsyncMock(side_effect=RuntimeError("image API exploded")),
+        ):
+            response = client.post("/api/v1/generate-story", json=_valid_payload())
+
+        assert response.status_code == 200
+        body = response.json()["data"]
+        assert body["cover_image_base64"] is None
+        assert body["cover_image_mime_type"] is None
+        assert body["title"] == fake_story_data.title
+
+    def test_no_image_generated_returns_null_fields_not_error(self, fake_story_data):
+        """generate_story_image() returning (None, None) — its own normal
+        best-effort failure path — must not surface as an API error."""
+        with patch(
+            "app.routers.story.extractor.extract_content",
+            new=AsyncMock(return_value=VALID_TWEET_TEXT),
+        ), patch(
+            "app.routers.story.llm_service.generate_story_from_text",
+            new=AsyncMock(return_value=fake_story_data),
+        ), patch(
+            "app.routers.story.image_service.generate_story_image",
+            new=AsyncMock(return_value=(None, None)),
+        ):
+            response = client.post("/api/v1/generate-story", json=_valid_payload())
+
+        assert response.status_code == 200
+        body = response.json()["data"]
+        assert body["cover_image_base64"] is None
+
+    def test_story_rejection_does_not_wait_on_image(self, fake_story_data):
+        """If the LLM rejects the content as insufficient, the request should
+        still fail with 422 regardless of the image task's outcome."""
+        with patch(
+            "app.routers.story.extractor.extract_content",
+            new=AsyncMock(return_value=VALID_TWEET_TEXT),
+        ), patch(
+            "app.routers.story.llm_service.generate_story_from_text",
+            new=AsyncMock(
+                side_effect=HTTPException(
+                    status_code=422,
+                    detail="Unable to generate a story from the provided input: too vague.",
+                )
+            ),
+        ), patch(
+            "app.routers.story.image_service.generate_story_image",
+            new=AsyncMock(return_value=("somebase64", "image/png")),
+        ):
+            response = client.post("/api/v1/generate-story", json=_valid_payload())
+
+        assert response.status_code == 422
+
+
+class TestImageServiceUnit:
+    """Direct tests of image_service.py's own internal behavior."""
+
+    def test_missing_credentials_returns_none_without_calling_api(self):
+        from app.services import image_service
+
+        with patch.object(image_service.settings, "cloudflare_account_id", ""), patch.object(
+            image_service.settings, "cloudflare_api_token", "some-token"
+        ):
+            result = asyncio.run(
+                image_service.generate_story_image(VALID_TWEET_TEXT, VALID_AUTHOR_HANDLE)
+            )
+        assert result == (None, None)
+
+    def test_network_error_returns_none_none(self):
+        from app.services import image_service
+
+        class RaisingAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, *args, **kwargs):
+                import httpx
+
+                raise httpx.ConnectError("boom")
+
+        with patch.object(
+            image_service.settings, "cloudflare_account_id", "fake-account"
+        ), patch.object(
+            image_service.settings, "cloudflare_api_token", "fake-token"
+        ), patch(
+            "app.services.image_service.httpx.AsyncClient", RaisingAsyncClient
+        ):
+            result = asyncio.run(
+                image_service.generate_story_image(VALID_TWEET_TEXT, VALID_AUTHOR_HANDLE)
+            )
+        assert result == (None, None)
+
+    def test_non_200_response_returns_none_none(self):
+        from app.services import image_service
+
+        class FakeResponse:
+            status_code = 429
+            text = "rate limited"
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        with patch.object(
+            image_service.settings, "cloudflare_account_id", "fake-account"
+        ), patch.object(
+            image_service.settings, "cloudflare_api_token", "fake-token"
+        ), patch(
+            "app.services.image_service.httpx.AsyncClient", FakeAsyncClient
+        ):
+            result = asyncio.run(
+                image_service.generate_story_image(VALID_TWEET_TEXT, VALID_AUTHOR_HANDLE)
+            )
+        assert result == (None, None)
+
+    def test_response_with_no_image_returns_none_none(self):
+        from app.services import image_service
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"success": True, "result": {}}
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        with patch.object(
+            image_service.settings, "cloudflare_account_id", "fake-account"
+        ), patch.object(
+            image_service.settings, "cloudflare_api_token", "fake-token"
+        ), patch(
+            "app.services.image_service.httpx.AsyncClient", FakeAsyncClient
+        ):
+            result = asyncio.run(
+                image_service.generate_story_image(VALID_TWEET_TEXT, VALID_AUTHOR_HANDLE)
+            )
+        assert result == (None, None)
+
+    def test_response_with_image_returns_base64_and_mime(self):
+        from app.services import image_service
+
+        import base64
+
+        fake_b64 = base64.b64encode(b"fake-jpeg-bytes").decode("utf-8")
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"success": True, "result": {"image": fake_b64}}
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, *args, **kwargs):
+                return FakeResponse()
+
+        with patch.object(
+            image_service.settings, "cloudflare_account_id", "fake-account"
+        ), patch.object(
+            image_service.settings, "cloudflare_api_token", "fake-token"
+        ), patch(
+            "app.services.image_service.httpx.AsyncClient", FakeAsyncClient
+        ):
+            encoded, mime_type = asyncio.run(
+                image_service.generate_story_image(VALID_TWEET_TEXT, VALID_AUTHOR_HANDLE)
+            )
+
+        assert base64.b64decode(encoded) == b"fake-jpeg-bytes"
+        assert mime_type == "image/jpeg"
