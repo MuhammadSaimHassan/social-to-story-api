@@ -14,6 +14,8 @@ let currentStory = null;
 
 const demoText =
   "Pakistan has launched a new digital skills initiative to train 100,000 young people in cloud computing, artificial intelligence, cybersecurity, and software development, aiming to strengthen the country's technology workforce and boost IT exports.";
+const demoAuthorHandle = "@MoitOfficial";
+const demoPostUrl = "https://x.com/MoitOfficial/status/2085985308718563602";
 
 function setStatus(message, isError = false) {
   statusMessage.textContent = message;
@@ -101,9 +103,9 @@ function renderStory(story) {
 
 function buildPayload() {
   return {
-    tweet_text: tweetText.value.trim() || null,
-    author_handle: authorHandle.value.trim() || null,
-    post_url: postUrl.value.trim() || null,
+    tweet_text: tweetText.value.trim(),
+    author_handle: authorHandle.value.trim(),
+    post_url: postUrl.value.trim(),
     output_format: "markdown",
   };
 }
@@ -149,8 +151,8 @@ async function downloadFile(url, story) {
 
 sampleButton.addEventListener("click", () => {
   tweetText.value = demoText;
-  authorHandle.value = "@MoitOfficial";
-  postUrl.value = "";
+  authorHandle.value = demoAuthorHandle;
+  postUrl.value = demoPostUrl;
 });
 
 form.addEventListener("submit", async (event) => {

@@ -6,8 +6,10 @@ structured `StoryData` object, using schema-enforced JSON output so the
 model's response can be parsed directly into Pydantic models.
 """
 
+import asyncio
 from functools import lru_cache
 import json
+import random
 from typing import List, Optional
 
 from google import genai
@@ -19,6 +21,12 @@ from pydantic import BaseModel, Field
 from app.core.config import settings
 from app.core.prompts import build_editorial_prompt
 from app.schemas.response import StoryData, TableItem
+
+# Gemini occasionally returns 503 UNAVAILABLE ("high demand") for a moment
+# even when the service is generally healthy. These are transient and worth
+# a few quick retries with backoff before surfacing an error to the user.
+_MAX_RETRIES = 3
+_BASE_DELAY_SECONDS = 1.5
 
 
 class _LLMTableItem(BaseModel):
@@ -42,19 +50,45 @@ class _LLMStoryOutput(BaseModel):
     computed locally from the returned `story_markdown` rather than trusted
     from the model, since LLMs are unreliable at self-reported counts. Also
     uses `_LLMTableItem` instead of `TableItem` for the reason described above.
+
+    `is_sufficient` and `rejection_reason` implement a content-gating
+    contract: the model judges whether the source material actually
+    supports a truthful story before writing one, rather than being forced
+    to fabricate content for trivial or empty input (e.g. "hello world").
+    The story fields are optional here since they're only populated when
+    is_sufficient is true — enforced explicitly in generate_story_from_text.
     """
 
-    title: str
-    subtitle: str
-    source_context: str
-    summary_table: List[_LLMTableItem]
-    story_markdown: str
+    is_sufficient: bool = False
+    rejection_reason: Optional[str] = None
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+    source_context: Optional[str] = None
+    summary_table: List[_LLMTableItem] = Field(default_factory=list)
+    story_markdown: Optional[str] = None
 
 
 _LLM_RESPONSE_SCHEMA = {
     "type": "OBJECT",
-    "required": ["title", "subtitle", "source_context", "summary_table", "story_markdown"],
+    "required": ["is_sufficient"],
     "properties": {
+        "is_sufficient": {
+            "type": "BOOLEAN",
+            "description": (
+                "True if the source material contains enough real, substantive "
+                "content to write a truthful analytical news story. False if the "
+                "input is a greeting, test message, placeholder, or otherwise "
+                "lacks any real newsworthy subject matter."
+            ),
+        },
+        "rejection_reason": {
+            "type": "STRING",
+            "description": (
+                "Required and populated only when is_sufficient is false: a "
+                "short, clear, user-facing explanation of why a story could not "
+                "be generated from this input."
+            ),
+        },
         "title": {
             "type": "STRING",
             "description": "Headline for the generated article.",
@@ -145,47 +179,84 @@ async def generate_story_from_text(
 
     prompt = build_editorial_prompt(input_text=content, author_handle=author_handle)
 
-    try:
-        client = _get_client()
-        response = await client.aio.models.generate_content(
-            model=settings.default_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=_LLM_RESPONSE_SCHEMA,
-            ),
-        )
-    except genai_errors.ClientError as exc:
-        # Covers 4xx errors from the API: invalid API key, quota/rate-limit
-        # exceeded (429), bad request, etc.
-        status = getattr(exc, "code", None)
-        if status == 429:
+    client = _get_client()
+    call_config = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=_LLM_RESPONSE_SCHEMA,
+        # Gemini 3 models default to HIGH thinking effort and, per Google's
+        # own SDK issue tracker (googleapis/python-genai#2062), thinking
+        # tokens are drawn from the SAME budget as max_output_tokens rather
+        # than a separate one. Left unset, thinking alone can consume
+        # nearly the entire budget (or hang with no cap at all), leaving
+        # little/no room for the actual story JSON — which is exactly what
+        # produces "is_sufficient: true" with an empty story_markdown.
+        # LOW is enough for this classification+writing task and leaves
+        # the bulk of the budget for the actual ~600-800 word story output.
+        thinking_config=types.ThinkingConfig(thinking_level="LOW"),
+        max_output_tokens=16384,
+    )
+
+    response = None
+    last_server_error: Optional[genai_errors.ServerError] = None
+
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            response = await client.aio.models.generate_content(
+                model=settings.default_model,
+                contents=prompt,
+                config=call_config,
+            )
+            break
+        except genai_errors.ClientError as exc:
+            # Covers 4xx errors from the API: invalid API key, quota/rate-limit
+            # exceeded (429), bad request, etc. Not worth retrying.
+            status = getattr(exc, "code", None)
+            if status == 429:
+                raise HTTPException(
+                    status_code=502,
+                    detail="LLM provider rate limit or quota exceeded. Please try again later.",
+                ) from exc
             raise HTTPException(
                 status_code=502,
-                detail="LLM provider rate limit or quota exceeded. Please try again later.",
+                detail=f"LLM provider rejected the request: {exc}",
             ) from exc
+        except genai_errors.ServerError as exc:
+            # Covers 5xx errors, including the common 503 "high demand"
+            # response, which is usually transient. Retry with backoff
+            # before giving up.
+            last_server_error = exc
+            if attempt < _MAX_RETRIES:
+                delay = _BASE_DELAY_SECONDS * (2**attempt) + random.uniform(0, 0.5)
+                await asyncio.sleep(delay)
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "LLM provider is currently experiencing high demand after "
+                    f"{_MAX_RETRIES + 1} attempts. Please try again in a moment. "
+                    f"({exc})"
+                ),
+            ) from exc
+        except genai_errors.APIError as exc:
+            # Catch-all for any other SDK-level API error.
+            raise HTTPException(
+                status_code=502,
+                detail=f"LLM API error: {exc}",
+            ) from exc
+        except Exception as exc:
+            # Connectivity issues (DNS, timeouts, etc.) and anything unforeseen.
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to reach LLM provider: {exc.__class__.__name__}: {exc}",
+            ) from exc
+
+    if response is None:
+        # Should be unreachable (the loop above always either returns a
+        # response or raises), but guards against silent fallthrough.
         raise HTTPException(
             status_code=502,
-            detail=f"LLM provider rejected the request: {exc}",
-        ) from exc
-    except genai_errors.ServerError as exc:
-        # Covers 5xx errors: the LLM provider is down or overloaded.
-        raise HTTPException(
-            status_code=502,
-            detail=f"LLM provider is currently unavailable: {exc}",
-        ) from exc
-    except genai_errors.APIError as exc:
-        # Catch-all for any other SDK-level API error.
-        raise HTTPException(
-            status_code=502,
-            detail=f"LLM API error: {exc}",
-        ) from exc
-    except Exception as exc:
-        # Connectivity issues (DNS, timeouts, etc.) and anything unforeseen.
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to reach LLM provider: {exc.__class__.__name__}: {exc}",
-        ) from exc
+            detail=f"LLM provider is currently unavailable: {last_server_error}",
+        )
 
     raw_parsed = getattr(response, "parsed", None)
 
@@ -212,6 +283,36 @@ async def generate_story_from_text(
             detail="LLM response could not be parsed into the expected story schema.",
         ) from exc
 
+    if not parsed.is_sufficient:
+        reason = (
+            parsed.rejection_reason
+            or "The provided content does not contain enough substantive information "
+            "to generate a story."
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unable to generate a story from the provided input: {reason}",
+        )
+
+    # Defensive check: if the model says is_sufficient=true but didn't
+    # actually populate the story fields, treat that as a malformed
+    # response rather than silently returning an empty/broken story.
+    if not parsed.title or not parsed.story_markdown or not parsed.subtitle:
+        finish_reason = None
+        try:
+            finish_reason = response.candidates[0].finish_reason
+        except Exception:
+            pass
+        detail = (
+            "LLM indicated sufficient content but did not return a complete "
+            "story. Please try again."
+        )
+        if finish_reason and str(finish_reason) != "STOP":
+            # Most commonly MAX_TOKENS — the model ran out of output budget
+            # (often to thinking tokens) before finishing the story.
+            detail += f" (finish_reason={finish_reason})"
+        raise HTTPException(status_code=500, detail=detail)
+
     word_count = _count_words(parsed.story_markdown)
 
     summary_table = [
@@ -222,7 +323,7 @@ async def generate_story_from_text(
     return StoryData(
         title=parsed.title,
         subtitle=parsed.subtitle,
-        source_context=parsed.source_context,
+        source_context=parsed.source_context or f"Source: {author_handle}",
         summary_table=summary_table,
         story_markdown=parsed.story_markdown,
         word_count=word_count,

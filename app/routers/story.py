@@ -24,19 +24,14 @@ async def _generate_story_data(payload: StoryRequest):
             post_url=payload.post_url,
         )
     except HTTPException:
-        # Already a well-formed HTTP error (e.g. 400 for bad/unreachable URL) — propagate as-is.
+        # Already a well-formed HTTP error (e.g. 400 for a post that can't be
+        # found/reached) — propagate as-is.
         raise
     except Exception as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Failed to extract content from the provided input: {exc}",
         ) from exc
-
-    if not content or not content.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Resolved source content is empty; cannot generate a story from it.",
-        )
 
     try:
         story_data = await llm_service.generate_story_from_text(

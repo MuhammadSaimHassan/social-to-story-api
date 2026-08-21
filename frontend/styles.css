@@ -178,6 +178,13 @@ button:disabled {
   color: var(--accent-dark);
 }
 
+.field-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
 .status {
   min-height: 22px;
   margin-top: 16px;

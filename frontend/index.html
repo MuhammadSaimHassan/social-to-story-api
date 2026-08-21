@@ -30,13 +30,24 @@
           <div class="field-grid">
             <div>
               <label for="authorHandle">Author handle</label>
-              <input id="authorHandle" name="authorHandle" placeholder="@MoitOfficial" />
+              <input id="authorHandle" name="authorHandle" placeholder="@MoitOfficial" required />
             </div>
             <div>
               <label for="postUrl">Post URL</label>
-              <input id="postUrl" name="postUrl" placeholder="Optional" />
+              <input
+                id="postUrl"
+                name="postUrl"
+                type="url"
+                placeholder="https://x.com/handle/status/123456789"
+                required
+              />
             </div>
           </div>
+          <p class="field-hint">
+            All three fields are required — the post's text, its author's handle, and a
+            link to the original X (Twitter) post, which is used to confirm the post
+            actually exists before generating a story from it.
+          </p>
 
           <div class="actions">
             <button class="primary" type="submit" id="generateButton">Generate Story</button>

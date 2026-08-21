@@ -1,16 +1,14 @@
 """
 Content extractor service.
 
-Resolves the actual source text to feed the LLM: uses `tweet_text` directly
-when provided, otherwise fetches `post_url` and attempts to pull post content
-from OpenGraph / Twitter meta tags.
+Resolves and validates the source content for story generation: uses
+`tweet_text` as the grounded content fed to the LLM, while always fetching
+`post_url` to confirm the post actually exists before generation proceeds.
 """
 
 import re
-from typing import Optional
 
 import httpx
-from bs4 import BeautifulSoup
 from fastapi import HTTPException
 
 # Standard desktop User-Agent. Many sites (including x.com) return
@@ -26,43 +24,29 @@ _REQUEST_HEADERS = {
 
 _REQUEST_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
-# Meta tags checked, in priority order, for post content.
-_META_CANDIDATES = [
-    ("property", "og:description"),
-    ("name", "twitter:description"),
-    ("property", "twitter:description"),
-]
-
 
 def _sanitize_text(text: str) -> str:
     """Normalize whitespace and strip control characters from source text."""
     if not text:
         return ""
-    # Collapse runs of whitespace (including newlines/tabs) into single spaces.
     cleaned = re.sub(r"\s+", " ", text).strip()
     return cleaned
 
 
-def _extract_meta_description(html: str) -> Optional[str]:
-    """Parse HTML and return the first matching OpenGraph/Twitter description."""
-    soup = BeautifulSoup(html, "html.parser")
+async def _verify_post_exists(post_url: str) -> None:
+    """Confirm `post_url` actually resolves to a real, live post.
 
-    for attr, value in _META_CANDIDATES:
-        tag = soup.find("meta", attrs={attr: value})
-        if tag and tag.get("content"):
-            content = tag["content"].strip()
-            if content:
-                return content
-
-    return None
-
-
-async def _fetch_post_content(post_url: str) -> str:
-    """Fetch `post_url` and extract post text from its meta tags.
+    This is an existence check, not a content-scraping step: X/Twitter
+    frequently blocks automated scraping of post content (returns 200 with
+    no usable metadata) even for perfectly real posts, so we can't reliably
+    use "did we extract a description" as a proxy for "does this post
+    exist". Instead we treat a definitive 404 (or a request that never
+    resolves at all) as proof the post is missing, and treat any other
+    response as evidence the URL at least resolves to something.
 
     Raises:
-        HTTPException(400): if the URL cannot be fetched or no usable
-            content can be extracted from it.
+        HTTPException(400): if the URL is unreachable or definitively
+            returns a not-found response.
     """
     try:
         async with httpx.AsyncClient(
@@ -71,71 +55,76 @@ async def _fetch_post_content(post_url: str) -> str:
             follow_redirects=True,
         ) as client:
             response = await client.get(post_url)
-            response.raise_for_status()
     except httpx.TimeoutException as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Timed out while fetching post_url: {post_url}",
-        ) from exc
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=400,
             detail=(
-                f"Failed to fetch post_url (status {exc.response.status_code}): {post_url}"
+                f"Timed out while verifying post_url: {post_url}. "
+                "Please check the link and try again."
             ),
         ) from exc
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Could not reach post_url: {post_url} ({exc.__class__.__name__})",
+            detail=(
+                f"Could not reach post_url: {post_url} "
+                f"({exc.__class__.__name__}). Please check the link is correct."
+            ),
         ) from exc
 
-    description = _extract_meta_description(response.text)
-
-    if not description:
+    if response.status_code == 404:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Could not extract post content from post_url. The page may "
-                "require authentication, block automated requests, or lack "
-                "OpenGraph/Twitter meta tags. Please provide 'tweet_text' directly instead."
+                "The post at the given post_url could not be found. It may "
+                "have been deleted, made private, or the URL may be incorrect."
             ),
         )
 
-    return description
+    if response.status_code >= 500:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"post_url returned a server error (status "
+                f"{response.status_code}) and could not be verified. Please "
+                "try again shortly."
+            ),
+        )
+
+    # Any other status (200, or a 3xx that follow_redirects already resolved,
+    # or even a 401/403 from X's bot-blocking) is treated as "the post
+    # exists" — X routinely returns non-200 statuses to automated clients
+    # for posts that are perfectly real and publicly visible in a browser.
 
 
-async def extract_content(
-    tweet_text: Optional[str] = None,
-    post_url: Optional[str] = None,
-) -> str:
-    """Resolve the source text for story generation.
+async def extract_content(tweet_text: str, post_url: str) -> str:
+    """Resolve and validate the source text for story generation.
 
-    If `tweet_text` is provided, it is sanitized and returned directly
-    (no network call is made). Otherwise, `post_url` is fetched and its
-    OpenGraph/Twitter description meta tag is used as the source content.
+    Always verifies `post_url` resolves to a real post (raising if it's
+    definitively not found or unreachable), then returns the sanitized
+    `tweet_text` as the grounded content to feed the LLM — text supplied
+    directly by the caller is more reliable than scraping X's often-blocked
+    metadata tags, but the URL check still confirms the post is real.
 
     Args:
-        tweet_text: Raw post text, if directly supplied.
-        post_url: URL of the original post, used as a fallback source.
+        tweet_text: Raw post text, required.
+        post_url: URL of the original post, required — used to verify the
+            post exists.
 
     Returns:
         Cleaned source text ready to be passed into the editorial prompt.
 
     Raises:
-        HTTPException(400): if neither input yields usable content.
+        HTTPException(400): if post_url is unreachable or the post can't be
+            found, or if tweet_text sanitizes down to nothing.
     """
-    if tweet_text and tweet_text.strip():
-        return _sanitize_text(tweet_text)
+    await _verify_post_exists(post_url)
 
-    if post_url and post_url.strip():
-        raw_content = await _fetch_post_content(post_url.strip())
-        return _sanitize_text(raw_content)
+    cleaned_text = _sanitize_text(tweet_text)
+    if not cleaned_text:
+        raise HTTPException(
+            status_code=400,
+            detail="tweet_text is empty after cleaning; cannot generate a story from it.",
+        )
 
-    # Should not normally be reached since StoryRequest already validates
-    # that at least one of the two is present, but guarded here defensively
-    # in case this service is called directly from elsewhere.
-    raise HTTPException(
-        status_code=400,
-        detail="Either 'tweet_text' or 'post_url' must be provided to extract content.",
-    )
+    return cleaned_text
